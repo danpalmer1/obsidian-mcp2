@@ -29,10 +29,18 @@ async function createDirectory(
   recursive: boolean
 ): Promise<string> {
   const fullPath = path.join(vaultPath, dirPath);
-  
-  // Validate path is within vault
-  const normalizedPath = path.normalize(fullPath);
-  if (!normalizedPath.startsWith(path.normalize(vaultPath))) {
+
+  // Validate path is within vault. Use path.relative rather than startsWith
+  // to avoid prefix-confusion: "/vault/foo".startsWith("/vault") is true
+  // for "/vault-evil" as well as "/vault/evil". path.relative returns a
+  // path starting with ".." when the target escapes the base.
+  const resolvedVault = path.resolve(vaultPath);
+  const normalizedPath = path.resolve(fullPath);
+  const relativeToVault = path.relative(resolvedVault, normalizedPath);
+  if (
+    relativeToVault.startsWith('..') ||
+    path.isAbsolute(relativeToVault)
+  ) {
     throw new McpError(
       ErrorCode.InvalidRequest,
       "Directory path must be within the vault directory"
