@@ -372,27 +372,51 @@ export async function checkPathSafety(basePath: string, targetPath: string): Pro
   const resolvedPath = normalizePath(targetPath);
   const resolvedBasePath = normalizePath(basePath);
 
+  // Use path.relative for containment rather than startsWith. startsWith is
+  // prefix-confusion vulnerable: "/vault/x".startsWith("/vault") is true
+  // for "/vault-evil/x" as well as "/vault/evil/x".
+  const isContained = (childAbs: string, parentAbs: string): boolean => {
+    const rel = path.relative(parentAbs, childAbs);
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  };
+
+  // Resolve symlinks on the base too, so a symlinked vault is compared
+  // against its real location rather than the link.
+  let realBase: string;
   try {
-    // Check real path for symlinks
-    const realPath = await fs.realpath(resolvedPath);
-    const normalizedReal = normalizePath(realPath);
-    
-    // Check if real path is within base path
-    if (!normalizedReal.startsWith(resolvedBasePath)) {
+    realBase = normalizePath(await fs.realpath(resolvedBasePath));
+  } catch {
+    realBase = resolvedBasePath;
+  }
+
+  try {
+    // Existing path: realpath resolves any symlinks along the way and
+    // must still land inside the vault.
+    const realPath = normalizePath(await fs.realpath(resolvedPath));
+    if (!isContained(realPath, realBase)) {
       return false;
     }
-
-    // Check if original path is within base path
-    return resolvedPath.startsWith(resolvedBasePath);
-  } catch (error) {
-    // For new files that don't exist yet, verify parent directory
-    const parentDir = path.dirname(resolvedPath);
-    try {
-      const realParentPath = await fs.realpath(parentDir);
-      const normalizedParent = normalizePath(realParentPath);
-      return normalizedParent.startsWith(resolvedBasePath);
-    } catch {
-      return false;
+    // The lexical path must also be inside the base — defends against a
+    // case where realpath happens to land inside but the input itself
+    // expressed an escape that the caller would otherwise act on.
+    return isContained(resolvedPath, resolvedBasePath);
+  } catch {
+    // For new files that don't exist yet, verify the parent directory's
+    // real path is inside the vault. Walk upward until we find a parent
+    // that does exist, so an attacker can't bypass the check by also
+    // passing a non-existent intermediate component.
+    let current = path.dirname(resolvedPath);
+    while (true) {
+      try {
+        const realParent = normalizePath(await fs.realpath(current));
+        return isContained(realParent, realBase);
+      } catch {
+        const next = path.dirname(current);
+        if (next === current) {
+          return false;
+        }
+        current = next;
+      }
     }
   }
 }
