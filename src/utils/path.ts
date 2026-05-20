@@ -2,11 +2,13 @@ import path from "path";
 import fs from "fs/promises";
 import { McpError, ErrorCode } from "@modelcontextprotocol/sdk/types.js";
 import os from "os";
-import { exec as execCallback } from "child_process";
+import { execFile as execFileCallback } from "child_process";
 import { promisify } from "util";
 
-// Promisify exec for cleaner async/await usage
-const exec = promisify(execCallback);
+// Promisify execFile (no shell) for cleaner async/await usage.
+// Using execFile instead of exec avoids shell-metacharacter injection
+// from any operator-supplied path that is forwarded to wmic/powershell/df.
+const execFile = promisify(execFileCallback);
 
 /**
  * Checks if a path contains any problematic characters or patterns
@@ -131,18 +133,30 @@ export async function checkLocalPath(vaultPath: string): Promise<string | null> 
     if (process.platform === 'win32') {
       // Windows UNC paths and mapped drives
       if (realPath.startsWith('\\\\') || /^[a-zA-Z]:\\$/.test(realPath.slice(0, 3))) {
-        // Check Windows drive type
+        // Check Windows drive type. Constrain `drive` to a single ASCII letter
+        // before interpolation so it cannot inject shell metacharacters into
+        // the wmic/powershell argument vectors below.
         const drive = realPath[0].toUpperCase();
-        
+        if (!/^[A-Z]$/.test(drive)) {
+          return 'Unable to determine drive letter for path';
+        }
+
         // Helper functions for drive type checking
         async function checkWithWmic() {
-          const cmd = `wmic logicaldisk where "DeviceID='${drive}:'" get DriveType /value`;
-          return await exec(cmd, { timeout: 5000 });
+          return await execFile(
+            'wmic',
+            ['logicaldisk', 'where', `DeviceID='${drive}:'`, 'get', 'DriveType', '/value'],
+            { timeout: 5000 }
+          );
         }
 
         async function checkWithPowershell() {
-          const cmd = `powershell -Command "(Get-WmiObject -Class Win32_LogicalDisk | Where-Object { $_.DeviceID -eq '${drive}:' }).DriveType"`;
-          const { stdout, stderr } = await exec(cmd, { timeout: 5000 });
+          const psCommand = `(Get-WmiObject -Class Win32_LogicalDisk | Where-Object { $_.DeviceID -eq '${drive}:' }).DriveType`;
+          const { stdout, stderr } = await execFile(
+            'powershell',
+            ['-NoProfile', '-NonInteractive', '-Command', psCommand],
+            { timeout: 5000 }
+          );
           return { stdout: `DriveType=${stdout.trim()}`, stderr };
         }
         
@@ -182,11 +196,11 @@ export async function checkLocalPath(vaultPath: string): Promise<string | null> 
       // Unix network mounts (common mount points)
       const networkPaths = ['/net/', '/mnt/', '/media/', '/Volumes/'];
       if (networkPaths.some(prefix => realPath.startsWith(prefix))) {
-        // Check if it's a network mount using df
-        // Check Unix mount type
-        const cmd = `df -P "${realPath}" | tail -n 1`;
+        // Check if it's a network mount using df. realPath is passed as an
+        // argv entry to execFile (no shell), so embedded quotes/metacharacters
+        // in the resolved path cannot inject additional commands.
         try {
-          const { stdout, stderr } = await exec(cmd, { timeout: 5000 })
+          const { stdout, stderr } = await execFile('df', ['-P', realPath], { timeout: 5000 })
             .catch((error: Error & { code?: string }) => {
               if (error.code === 'ETIMEDOUT') {
                 // Timeout often indicates a network mount
@@ -195,16 +209,19 @@ export async function checkLocalPath(vaultPath: string): Promise<string | null> 
               throw error;
             });
 
+          // Use only the last line (df prints a header followed by mount info)
+          const lastLine = stdout.trim().split(/\r?\n/).pop() ?? '';
+
           if (stderr) {
             console.error(`Warning: Mount type check produced errors:`, stderr);
           }
 
           // Check for common network filesystem indicators
-          const isNetwork = stdout.match(/^(nfs|cifs|smb|afp|ftp|ssh|davfs)/i) ||
-                          stdout.includes(':') ||
-                          stdout.includes('//') ||
-                          stdout.includes('type fuse.') ||
-                          stdout.includes('network');
+          const isNetwork = lastLine.match(/^(nfs|cifs|smb|afp|ftp|ssh|davfs)/i) ||
+                          lastLine.includes(':') ||
+                          lastLine.includes('//') ||
+                          lastLine.includes('type fuse.') ||
+                          lastLine.includes('network');
 
           if (isNetwork) {
             return 'Network or remote filesystem is not supported';
