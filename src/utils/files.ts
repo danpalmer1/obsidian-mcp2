@@ -36,9 +36,20 @@ export async function getAllMarkdownFiles(vaultPath: string, dir = vaultPath): P
 
     for (const entry of entries) {
       try {
+        // Skip symlinks/junctions explicitly. A symlink inside the vault
+        // pointing outward would otherwise be traversed (on Windows
+        // junctions in particular Dirent.isDirectory() can report true)
+        // and could leak files from outside the vault into search/tag
+        // operations, or cause infinite recursion on self-referential
+        // links. Containment-checked file ops also follow symlinks via
+        // realpath, so it is safer to refuse them at enumeration time.
+        if (entry.isSymbolicLink()) {
+          continue;
+        }
+
         // Use safeJoinPath to ensure path safety
         const fullPath = await safeJoinPath(normalizedDir, entry.name);
-        
+
         if (entry.isDirectory()) {
           if (!entry.name.startsWith(".")) {
             const subDirFiles = await getAllMarkdownFiles(normalizedVaultPath, fullPath);
