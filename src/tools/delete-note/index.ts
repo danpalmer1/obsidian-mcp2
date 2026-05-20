@@ -2,7 +2,7 @@ import { z } from "zod";
 import { promises as fs } from "fs";
 import path from "path";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
-import { ensureMarkdownExtension, validateVaultPath } from "../../utils/path.js";
+import { validateVaultPath } from "../../utils/path.js";
 import { fileExists, ensureDirectory } from "../../utils/files.js";
 import { updateVaultLinks } from "../../utils/links.js";
 import { createNoteNotFoundError, handleFsError } from "../../utils/errors.js";
@@ -15,9 +15,13 @@ const schema = z.object({
     .describe("Name of the vault containing the note"),
   path: z.string()
     .min(1, "Path cannot be empty")
-    .refine(name => !path.isAbsolute(name), 
+    .refine(name => !path.isAbsolute(name),
       "Path must be relative to vault root")
-    .describe("Path of the note relative to vault root (e.g., 'folder/note.md')"),
+    .refine(name => !name.split(/[\\/]/).includes('..'),
+      "Path must not contain '..' segments")
+    .refine(name => name.toLowerCase().endsWith('.md'),
+      "Path must end in .md — pass the exact filename, no auto-extension is applied for delete")
+    .describe("Path of the note relative to vault root, including .md extension (e.g., 'folder/note.md')"),
   reason: z.string()
     .optional()
     .describe("Optional reason for deletion (stored in trash metadata)"),
@@ -93,7 +97,7 @@ async function deleteNote(
   const fullPath = path.join(vaultPath, notePath);
 
   // Validate path is within vault
-  validateVaultPath(vaultPath, fullPath);
+  await validateVaultPath(vaultPath, fullPath);
 
   try {
     // Check if note exists
@@ -131,12 +135,13 @@ export function createDeleteNoteTool(vaults: Map<string, string>) {
     description: "Delete a note, moving it to .trash by default or permanently deleting if specified",
     schema,
     handler: async (args, vaultPath, _vaultName) => {
-      // Ensure .md extension
-      const fullNotePath = ensureMarkdownExtension(args.path);
-      
-      const resultMessage = await deleteNote(vaultPath, fullNotePath, { 
-        reason: args.reason, 
-        permanent: args.permanent 
+      // No auto-extension: schema requires the caller to pass the exact
+      // .md filename. Auto-appending .md to a destructive operation lets
+      // an attacker trick the tool into deleting unrelated files (e.g.
+      // "../../config" -> "../../config.md").
+      const resultMessage = await deleteNote(vaultPath, args.path, {
+        reason: args.reason,
+        permanent: args.permanent
       });
       
       return {

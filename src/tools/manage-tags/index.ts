@@ -23,8 +23,12 @@ const schema = z.object({
   files: z.array(z.string())
     .min(1, "At least one file must be specified")
     .refine(
-      files => files.every(f => f.endsWith('.md')),
-      "All files must have .md extension"
+      files => files.every(f =>
+        f.toLowerCase().endsWith('.md') &&
+        !path.isAbsolute(f) &&
+        !f.split(/[\\/]/).includes('..')
+      ),
+      "Each file must be a relative .md path inside the vault (no '..' segments, no absolute paths)"
     ),
   operation: z.enum(['add', 'remove'])
     .describe("Whether to add or remove the specified tags"),
@@ -110,7 +114,7 @@ async function manageTags(
     
     try {
       // Validate path is within vault
-      validateVaultPath(vaultPath, fullPath);
+      await validateVaultPath(vaultPath, fullPath);
       
       // Check if file exists
       if (!await fileExists(fullPath)) {

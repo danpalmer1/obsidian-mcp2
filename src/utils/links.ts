@@ -2,6 +2,20 @@ import { promises as fs } from "fs";
 import path from "path";
 import { getAllMarkdownFiles } from "./files.js";
 
+// Escape characters with special meaning in a RegExp source. Without this,
+// a filename like ".*" or "(a+)+" turns the link-rewriter into a vault-wide
+// content shredder (matches every link) or a ReDoS vector.
+function escapeRegExp(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// In a String.prototype.replace replacement string, "$" is the only
+// metacharacter ($1, $&, $$ etc.). Double it so literal "$" in a filename
+// is preserved instead of being interpreted as a back-reference.
+function escapeReplacement(input: string): string {
+  return input.replace(/\$/g, "$$$$");
+}
+
 interface LinkUpdateOptions {
   filePath: string;
   oldPath: string;
@@ -29,52 +43,60 @@ export async function updateLinksInFile({
   
   const oldName = path.basename(oldPath, ".md");
   const newName = newPath ? path.basename(newPath, ".md") : null;
-  
+
+  // Escape filename components going into the regex pattern, and any
+  // value interpolated into the replacement string.
+  const oldNameRe = escapeRegExp(oldName);
+  const oldNameRepl = escapeReplacement(oldName);
+  const newNameRepl = newName !== null ? escapeReplacement(newName) : null;
+  const destVaultRepl = destVaultName ? escapeReplacement(destVaultName) : "";
+  const sourceVaultRepl = sourceVaultName ? escapeReplacement(sourceVaultName) : "";
+
   let newContent: string;
-  
+
   if (isMovedToOtherVault) {
     // Handle move to another vault - add vault reference
     newContent = content
       .replace(
-        new RegExp(`\\[\\[${oldName}(\\|[^\\]]*)?\\]\\]`, "g"),
-        `[[${destVaultName}/${oldName}$1]]`
+        new RegExp(`\\[\\[${oldNameRe}(\\|[^\\]]*)?\\]\\]`, "g"),
+        `[[${destVaultRepl}/${oldNameRepl}$1]]`
       )
       .replace(
-        new RegExp(`\\[([^\\]]*)\\]\\(${oldName}\\.md\\)`, "g"),
-        `[$1](${destVaultName}/${oldName}.md)`
+        new RegExp(`\\[([^\\]]*)\\]\\(${oldNameRe}\\.md\\)`, "g"),
+        `[$1](${destVaultRepl}/${oldNameRepl}.md)`
       );
   } else if (isMovedFromOtherVault) {
     // Handle move from another vault - add note about original location
     newContent = content
       .replace(
-        new RegExp(`\\[\\[${oldName}(\\|[^\\]]*)?\\]\\]`, "g"),
-        `[[${newName}$1]] *(moved from ${sourceVaultName})*`
+        new RegExp(`\\[\\[${oldNameRe}(\\|[^\\]]*)?\\]\\]`, "g"),
+        `[[${newNameRepl}$1]] *(moved from ${sourceVaultRepl})*`
       )
       .replace(
-        new RegExp(`\\[([^\\]]*)\\]\\(${oldName}\\.md\\)`, "g"),
-        `[$1](${newName}.md) *(moved from ${sourceVaultName})*`
+        new RegExp(`\\[([^\\]]*)\\]\\(${oldNameRe}\\.md\\)`, "g"),
+        `[$1](${newNameRepl}.md) *(moved from ${sourceVaultRepl})*`
       );
   } else if (!newPath) {
     // Handle deletion - strike through the links
     newContent = content
       .replace(
-        new RegExp(`\\[\\[${oldName}(\\|[^\\]]*)?\\]\\]`, "g"),
-        `~~[[${oldName}$1]]~~`
+        new RegExp(`\\[\\[${oldNameRe}(\\|[^\\]]*)?\\]\\]`, "g"),
+        `~~[[${oldNameRepl}$1]]~~`
       )
       .replace(
-        new RegExp(`\\[([^\\]]*)\\]\\(${oldName}\\.md\\)`, "g"),
-        `~~[$1](${oldName}.md)~~`
+        new RegExp(`\\[([^\\]]*)\\]\\(${oldNameRe}\\.md\\)`, "g"),
+        `~~[$1](${oldNameRepl}.md)~~`
       );
   } else {
     // Handle move/rename within same vault
     newContent = content
       .replace(
-        new RegExp(`\\[\\[${oldName}(\\|[^\\]]*)?\\]\\]`, "g"),
-        `[[${newName}$1]]`
+        new RegExp(`\\[\\[${oldNameRe}(\\|[^\\]]*)?\\]\\]`, "g"),
+        `[[${newNameRepl}$1]]`
       )
       .replace(
-        new RegExp(`\\[([^\\]]*)\\]\\(${oldName}\\.md\\)`, "g"),
-        `[$1](${newName}.md)`
+        new RegExp(`\\[([^\\]]*)\\]\\(${oldNameRe}\\.md\\)`, "g"),
+        `[$1](${newNameRepl}.md)`
       );
   }
 
