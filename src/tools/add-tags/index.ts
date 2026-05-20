@@ -23,10 +23,14 @@ const schema = z.object({
   files: z.array(z.string())
     .min(1, "At least one file must be specified")
     .refine(
-      files => files.every(f => f.endsWith('.md')),
-      "All files must have .md extension"
+      files => files.every(f =>
+        f.toLowerCase().endsWith('.md') &&
+        !path.isAbsolute(f) &&
+        !f.split(/[\\/]/).includes('..')
+      ),
+      "Each file must be a relative .md path inside the vault (no '..' segments, no absolute paths)"
     )
-    .describe("Array of note filenames to process (must have .md extension)"),
+    .describe("Array of note filenames to process (relative .md paths inside the vault)"),
   tags: z.array(z.string())
     .min(1, "At least one tag must be specified")
     .refine(
